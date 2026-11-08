@@ -23,6 +23,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Download and stage IDA SDK
         shell: pwsh
         env:
@@ -37,29 +40,51 @@ jobs:
 
           Expand-Archive -Path $sdkZip -DestinationPath $sdkRoot -Force
 
-          $idaHeader = Get-ChildItem -Path $sdkRoot -Filter "ida.hpp" -File -Recurse | Select-Object -First 1
-          $idaLib = Get-ChildItem -Path $sdkRoot -Filter "ida.lib" -File -Recurse | Select-Object -First 1
-          $idaDebugLib = Get-ChildItem -Path $sdkRoot -Filter "idalib.lib" -File -Recurse | Select-Object -First 1
+          $idaHeader = Get-ChildItem -Path $sdkRoot -Filter "ida.hpp" -File -Recurse |
+            Select-Object -First 1
+          $idaLoaderHeader = Get-ChildItem -Path $sdkRoot -Filter "idaldr.h" -File -Recurse |
+            Select-Object -First 1
+          $idaLib = Get-ChildItem -Path $sdkRoot -Filter "ida.lib" -File -Recurse |
+            Select-Object -First 1
+          $idaDebugLib = Get-ChildItem -Path $sdkRoot -Filter "idalib.lib" -File -Recurse |
+            Select-Object -First 1
 
-          if (-not $idaHeader) { throw "SDK archive does not contain ida.hpp." }
-          if (-not $idaLib) { throw "SDK archive does not contain ida.lib." }
+          if (-not $idaHeader) {
+            throw "IDA SDK archive does not contain ida.hpp."
+          }
+          if (-not $idaLoaderHeader) {
+            throw "IDA SDK archive does not contain ldr\idaldr.h."
+          }
+          if (-not $idaLib) {
+            throw "IDA SDK archive does not contain ida.lib."
+          }
           if ($env:CONFIGURATION -eq "Debug" -and -not $idaDebugLib) {
-            throw "Debug build requires idalib.lib, but it was not found in the SDK archive."
+            throw "Debug configuration requires idalib.lib, but it was not found."
           }
 
+          # The project expects headers under ..\..\include and libraries under
+          # ..\..\lib\x64_win_vc_64, relative to the repository directory.
           $includeTarget = Join-Path $env:GITHUB_WORKSPACE "..\..\include"
           $libTarget = Join-Path $env:GITHUB_WORKSPACE "..\..\lib\x64_win_vc_64"
 
           New-Item -ItemType Directory -Path $includeTarget -Force | Out-Null
           New-Item -ItemType Directory -Path $libTarget -Force | Out-Null
 
+          # Copy both SDK include headers and loader headers. Copying the ldr
+          # contents into the include root makes <idaldr.h> resolvable.
           Copy-Item -Path (Join-Path $idaHeader.DirectoryName "*") `
             -Destination $includeTarget -Recurse -Force
-          Copy-Item -Path (Join-Path $idaLib.DirectoryName "*") `
-            -Destination $libTarget -Recurse -Force
+          Copy-Item -Path (Join-Path $idaLoaderHeader.DirectoryName "*") `
+            -Destination $includeTarget -Recurse -Force
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+          Copy-Item -Path $idaLib.FullName -Destination $libTarget -Force
+          if ($idaDebugLib) {
+            Copy-Item -Path $idaDebugLib.FullName -Destination $libTarget -Force
+          }
+
+          if (-not (Test-Path (Join-Path $includeTarget "idaldr.h"))) {
+            throw "Failed to stage idaldr.h in the project's include directory."
+          }
 
       - name: Build solution
         shell: pwsh
@@ -84,8 +109,8 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path .\dist -Force | Out-Null
-          Copy-Item $dll.FullName .\dist\
-          Copy-Item .\ps3.xml .\dist\
+          Copy-Item -Path $dll.FullName -Destination .\dist\
+          Copy-Item -Path .\ps3.xml -Destination .\dist\
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
