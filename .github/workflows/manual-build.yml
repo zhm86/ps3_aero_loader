@@ -58,6 +58,9 @@ jobs:
           Copy-Item -Path (Join-Path $idaLib.DirectoryName "*") `
             -Destination $libTarget -Recurse -Force
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Build solution
         shell: pwsh
         env:
