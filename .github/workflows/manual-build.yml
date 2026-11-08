@@ -1,0 +1,92 @@
+name: Manual build
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration
+        required: true
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download and stage IDA SDK
+        shell: pwsh
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          $sdkZip = Join-Path $env:RUNNER_TEMP "ida-sdk.zip"
+          $sdkRoot = Join-Path $env:RUNNER_TEMP "ida-sdk"
+
+          Invoke-WebRequest `
+            -Uri "https://vaclive.party/software/ida-pro/releases/download/9.1.250226/idasdk91.zip" `
+            -OutFile $sdkZip
+
+          Expand-Archive -Path $sdkZip -DestinationPath $sdkRoot -Force
+
+          $idaHeader = Get-ChildItem -Path $sdkRoot -Filter "ida.hpp" -File -Recurse | Select-Object -First 1
+          $idaLib = Get-ChildItem -Path $sdkRoot -Filter "ida.lib" -File -Recurse | Select-Object -First 1
+          $idaDebugLib = Get-ChildItem -Path $sdkRoot -Filter "idalib.lib" -File -Recurse | Select-Object -First 1
+
+          if (-not $idaHeader) { throw "SDK archive does not contain ida.hpp." }
+          if (-not $idaLib) { throw "SDK archive does not contain ida.lib." }
+          if ($env:CONFIGURATION -eq "Debug" -and -not $idaDebugLib) {
+            throw "Debug build requires idalib.lib, but it was not found in the SDK archive."
+          }
+
+          $includeTarget = Join-Path $env:GITHUB_WORKSPACE "..\..\include"
+          $libTarget = Join-Path $env:GITHUB_WORKSPACE "..\..\lib\x64_win_vc_64"
+
+          New-Item -ItemType Directory -Path $includeTarget -Force | Out-Null
+          New-Item -ItemType Directory -Path $libTarget -Force | Out-Null
+
+          Copy-Item -Path (Join-Path $idaHeader.DirectoryName "*") `
+            -Destination $includeTarget -Recurse -Force
+          Copy-Item -Path (Join-Path $idaLib.DirectoryName "*") `
+            -Destination $libTarget -Recurse -Force
+
+      - name: Build solution
+        shell: pwsh
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          msbuild .\ps3_aero_loader.sln `
+            /m `
+            /p:Configuration=$env:CONFIGURATION `
+            /p:Platform=x64 `
+            /p:WindowsTargetPlatformVersion=10.0
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path $env:GITHUB_WORKSPACE `
+            -Filter "ps3_aero_loader.dll" -File -Recurse |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            throw "ps3_aero_loader.dll was not found after the build."
+          }
+
+          New-Item -ItemType Directory -Path .\dist -Force | Out-Null
+          Copy-Item $dll.FullName .\dist\
+          Copy-Item .\ps3.xml .\dist\
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps3-aero-loader-${{ inputs.configuration }}-x64
+          path: dist/
+          if-no-files-found: error
